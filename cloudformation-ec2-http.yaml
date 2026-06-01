@@ -1,0 +1,122 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Plain HTTP Spring Boot NPE demo on EC2. Opens port 8080 and writes logs to /var/log/spring-http-npe-demo/app.log.
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: spring-http-npe-demo
+  LatestAmiId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64
+  InstanceType:
+    Type: String
+    Default: t3.micro
+  JarS3Bucket:
+    Type: String
+    Description: S3 bucket containing spring-http-npe-demo-1.0.0.jar
+  JarS3Key:
+    Type: String
+    Default: spring-http-npe-demo-1.0.0.jar
+    Description: S3 key of the Spring Boot executable JAR
+  AllowedHttpCidr:
+    Type: String
+    Default: 0.0.0.0/0
+    Description: CIDR allowed to call HTTP port 8080. Restrict to your IP for safer testing.
+
+Resources:
+  AppRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ProjectName}-ec2-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+      Policies:
+        - PolicyName: ReadApplicationJarFromS3
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                Resource: !Sub 'arn:aws:s3:::${JarS3Bucket}/${JarS3Key}'
+
+  InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      InstanceProfileName: !Sub '${ProjectName}-instance-profile'
+      Roles:
+        - !Ref AppRole
+
+  SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow plain HTTP Spring Boot demo on port 8080
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 8080
+          ToPort: 8080
+          CidrIp: !Ref AllowedHttpCidr
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+
+  AppInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref LatestAmiId
+      InstanceType: !Ref InstanceType
+      IamInstanceProfile: !Ref InstanceProfile
+      SecurityGroupIds:
+        - !Ref SecurityGroup
+      Tags:
+        - Key: Name
+          Value: !Ref ProjectName
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          set -eux
+          dnf update -y
+          dnf install -y java-17-amazon-corretto awscli
+          mkdir -p /opt/${ProjectName} /var/log/${ProjectName}
+          aws s3 cp s3://${JarS3Bucket}/${JarS3Key} /opt/${ProjectName}/app.jar
+          cat >/etc/systemd/system/${ProjectName}.service <<'SERVICE'
+          [Unit]
+          Description=Spring HTTP NPE Demo
+          After=network.target
+
+          [Service]
+          User=ec2-user
+          WorkingDirectory=/opt/${ProjectName}
+          ExecStart=/usr/bin/java -jar /opt/${ProjectName}/app.jar
+          Restart=always
+          RestartSec=10
+          StandardOutput=append:/var/log/${ProjectName}/app.log
+          StandardError=append:/var/log/${ProjectName}/app.log
+
+          [Install]
+          WantedBy=multi-user.target
+          SERVICE
+          chown -R ec2-user:ec2-user /opt/${ProjectName} /var/log/${ProjectName}
+          systemctl daemon-reload
+          systemctl enable ${ProjectName}
+          systemctl start ${ProjectName}
+
+Outputs:
+  ApplicationHttpUrl:
+    Description: Plain HTTP URL for the app
+    Value: !Sub 'http://${AppInstance.PublicDnsName}:8080'
+  TriggerNpeUrl:
+    Description: Plain HTTP URL to trigger NullPointerException
+    Value: !Sub 'http://${AppInstance.PublicDnsName}:8080/trigger-npe'
+  HealthUrl:
+    Description: Plain HTTP health URL
+    Value: !Sub 'http://${AppInstance.PublicDnsName}:8080/health'
+  InstanceId:
+    Value: !Ref AppInstance

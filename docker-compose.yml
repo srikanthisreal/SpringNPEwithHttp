@@ -1,0 +1,6 @@
+services:
+  spring-http-npe-demo:
+    build: .
+    container_name: spring-http-npe-demo
+    ports:
+      - "8080:8080"
